@@ -27,6 +27,14 @@ public class ExternalFrameHandler {
     public static final int TYPE_STR = 2;
     public static final int TYPE_NA = 3;
 
+    // hints for expected types in order to handle download properly
+
+    public static final byte T_INTEGER = 0;
+    public static final byte T_DOUBLE = 1;
+    public static final byte T_STRING = 2;
+
+
+
     public void process(AutoBuffer ab, SocketChannel sock) {
         // skip 2 bytes for port set by ab.putUdp. The port is
         // is zero anyway because the request came from non-h2o node and zero is default value
@@ -46,9 +54,12 @@ public class ExternalFrameHandler {
 
     private void handleDownloadFrame(AutoBuffer recvAb, SocketChannel sock) {
         String frame_key = recvAb.getStr();
+        byte[] expectedTypes = recvAb.getA1();
+        assert expectedTypes!=null;
         int chunk_id = recvAb.getInt();
 
         Frame fr = DKV.getGet(frame_key);
+
         Chunk[] chunks = ChunkUtils.getChunks(fr, chunk_id);
         AutoBuffer ab = new AutoBuffer();
         ab.putUdp(UDP.udp.external_frame);
@@ -65,18 +76,28 @@ public class ExternalFrameHandler {
                 } else {
                     ab.putInt(0);
 
-                    if (chunks[cidx].vec().isCategorical() || chunks[cidx].vec().isString() ||
-                            chunks[cidx].vec().isUUID()) {
-                        // handle strings
-                        ab.putStr(getStringFromChunk(chunks, cidx, rowIdx));
-                    } else if (chunks[cidx].vec().isNumeric() || chunks[cidx].vec().isTime()) { // isNumeric excludes categorial and time
-                        // handle numbers
-                        if (chunks[cidx].vec().isInt()) {
-                            ab.put8(chunks[cidx].at8(rowIdx));
-                        } else {
-                            ab.put8d(chunks[cidx].atd(rowIdx));
-                        }
+                    Chunk chnk = chunks[cidx];
+                    switch (expectedTypes[cidx]){
+                        case T_INTEGER:
+                            if(chnk.vec().isNumeric() || chnk.vec().isTime()){
+                                ab.put8(chnk.at8(rowIdx));
+                            }else{
+                                assert chnk.vec().domain()!=null && chnk.vec().domain().length!=0;
+                                // in this case the chunk is categorical with integers in the
+                                // domain
+                                ab.put8(Integer.parseInt(chnk.vec().domain()[(int) chnk.at8(rowIdx)]));
+                            }
+                            break;
+                        case T_DOUBLE:
+                            assert chnk.vec().isNumeric();
+                            ab.put8d(chnk.at8(rowIdx));
+                            break;
+                        case T_STRING:
+                            assert chnk.vec().isCategorical() || chnk.vec().isString() || chnk.vec().isUUID();
+                            ab.putStr(getStringFromChunk(chunks, cidx, rowIdx));
+                            break;
                     }
+
                 }
                 writeToChannel(ab, sock);
             }
